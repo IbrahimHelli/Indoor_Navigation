@@ -48,18 +48,16 @@ const int leftMotorPWM = 44;
 float yaw;
 float targetYaw;
 
+float offsetGyroZ;
 
+unsigned long previousMillis;
 
 // Filtrelenmiş değer için değişkenler
 float filtredMagX, filtredMagY, filtredMagZ;
 
-uint32_t previousMillis;
-
 // PD Controller
-float pdError = 0.0, prevPdError = 0.0, prevPrevPdError = 0.0, integral = 0.0, derivative = 0.0;
-const float Kp = 5.5, Kd = 1.0;
-unsigned long pdTimeNow = 0, pdTimePrev = 0;
-float deltaT = 0.0;
+const float Kp = 5.5, Kd = 1.0; 
+float pdError;
 int outputPD = 0;
 
 
@@ -80,6 +78,7 @@ void setup() {
   delay(250);
 
   initMPU6050();  // MPU6050 Sensörünü Başlat (ivmeölçer)
+  CalibrationGyro(&offsetGyroZ);
 
   initQMC5883L();  // QMC5883L Sensörünü Başlat (manyetometre)
 
@@ -95,14 +94,18 @@ void loop() {
   int16_t rawAccelX, rawAccelY, rawAccelZ;                     // Ham ivmeölçer verileri
   float calibratedAccelX, calibratedAccelY, calibratedAccelZ;  // Kalibre edilmiş ivmeölçer verileri
 
+  int16_t rawGyroZ;                    // Ham jiroskop verileri
+  float calibratedGyroZ;               // Kalibre edilmiş jiroskop verileri derece/saniye cinsinden
+
   int16_t rawMagX, rawMagY, rawMagZ;                     // Ham manyetometre verileri
   float calibratedMagX, calibratedMagY, calibratedMagZ;  // Kalibre edilmiş manyetometre verileri
 
-  // MPU6050 verilerini oku
-  readMPU6050(&rawAccelX, &rawAccelY, &rawAccelZ);
+  // MPU6050 İvmeölçer verilerini oku
+  readAccelMPU6050(&rawAccelX, &rawAccelY, &rawAccelZ);
   // Kalibre edilmiş değerleri hesapla
   getCalibratedAccel(rawAccelX, rawAccelY, rawAccelZ,
                      &calibratedAccelX, &calibratedAccelY, &calibratedAccelZ);
+
 
   // QMC5883L manyetometre verilerini oku
   readQMC5883L(&rawMagX, &rawMagY, &rawMagZ);
@@ -126,13 +129,13 @@ void loop() {
   // Yaw/heading/ baş açısını hesapla
   calculateYaw(medianAccelX, medianAccelY, medianAccelZ, filtredMagX, filtredMagY, filtredMagZ);
 
+  // MPU6050 jiroskop verilerini oku ve kalibre et
+  readGyroMPU6050(&rawGyroZ);
+  getCalibratedGyro(rawGyroZ, &calibratedGyroZ);
   // PD kontrolör
-  pdTimeNow = micros();
-  deltaT = (float)(pdTimeNow - pdTimePrev) / 1.0e6;
-
-  pdError = targetYaw - yaw;                                                               // Oransal terimi                                                             // Integral term
-  derivative = (float)(3 * pdError - 4 * prevPdError + prevPrevPdError) / (2.0 * deltaT);  // Türev terimi
-  outputPD = (int)(Kp * pdError + Kd * derivative);
+  pdError = targetYaw - yaw;
+ // derivative = calibratedGyroZ                                                  // yaw açısını Türev terimi
+  outputPD = (int)(Kp * pdError - Kd * calibratedGyroZ);
 
   //enkoderden mesafe hesaapla
   int16_t deltaRightPulseCount = rightPulseCount - previousRightPulseCount;
@@ -147,9 +150,6 @@ void loop() {
 
   //Navigasyonu yönet
   handleNavigation();
-  prevPrevPdError = prevPdError;
-  prevPdError = pdError;
-  pdTimePrev = pdTimeNow;
 
 
   // Bilgileri seri monitöre yazdır
@@ -279,7 +279,24 @@ void getCalibratedAccel(int16_t rawAccelX, int16_t rawAccelY, int16_t rawAccelZ,
   *calibratedAccelZ = (rawAccelZ - offsetAccelZ) * scaleFactorCorrectionAccelZ;
 }
 
+void getCalibratedGyro(int16_t rawGyroZ, float *calibratedGyroZ) {
 
+  *calibratedGyroZ = (rawGyroZ - offsetGyroZ)/65.5; // /65.5 derece/saniye cinsinden dönüşümü için gerekli adım
+}
+
+void CalibrationGyro(float *offsetGyroZ) {
+
+  Serial.println("jiroskop kalibrasyonu başladı lütfen sensörü hareket ettirmeyiniz...");
+  int16_t rawGyroZ;
+  for (int i = 0; i < 4000; i++) {
+
+    readGyroMPU6050(&rawGyroZ);
+    *offsetGyroZ += rawGyroZ;
+
+    delay(1);
+  }
+  *offsetGyroZ /= 4000.0;
+}
 
 // Kalibre edilmiş Manyetometre değerlerini hesapla
 void getCalibratedMag(int16_t rawMagX, int16_t rawMagY, int16_t rawMagZ, float *calibratedMagX, float *calibratedMagY, float *calibratedMagZ) {
@@ -306,7 +323,7 @@ void initMPU6050(void) {
 }
 
 // MPU6050'dan İvmeölçer verilerini oku
-void readMPU6050(int16_t *accelX, int16_t *accelY, int16_t *accelZ) {
+void readAccelMPU6050(int16_t *accelX, int16_t *accelY, int16_t *accelZ) {
   Wire.beginTransmission(MPU6050_ADDR);  // bu dört satırı alçak geçiş filtresini aç
   Wire.write(0x1A);
   Wire.write(0x05);  //5 byte yaz
@@ -326,6 +343,27 @@ void readMPU6050(int16_t *accelX, int16_t *accelY, int16_t *accelZ) {
     *accelX = Wire.read() << 8 | Wire.read();  //Yüksek biti (MSB) 8 bit kaydırarak LSB bitinden veri çekmek
     *accelY = Wire.read() << 8 | Wire.read();
     *accelZ = Wire.read() << 8 | Wire.read();
+  }
+}
+
+void readGyroMPU6050(int16_t *rawGyroZ) {
+
+  //jiroskop çıkışını yapılandırın ve sensörden dönüş hızı ölçümlerini çekin //bunu anlamadım
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x1B);  // jiroskop çözünlüğü ayarlanması
+  Wire.write(0x08);  // FS_SEL değeri 4. bitte bunun için biz 16ye çevirdik 0x08 çıktı
+  Wire.endTransmission();
+  Wire.requestFrom(MPU6050_ADDR, 6);
+
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(0x43);  //jiroskop değerleri hesaplamak için dizinin ilk adresi
+  Wire.endTransmission();
+  Wire.requestFrom(MPU6050_ADDR, 6);
+
+  if (Wire.available() == 6) {
+    int16_t rawGyroX = Wire.read() << 8 | Wire.read();  //Yüksek biti (MSB) 8 bit kaydırarak LSB bitinden veri çekmek
+    int16_t rawGyroY = Wire.read() << 8 | Wire.read();
+    *rawGyroZ = Wire.read() << 8 | Wire.read();
   }
 }
 // QMC5883L Sensörünü Başlat
